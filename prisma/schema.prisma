@@ -1,0 +1,342 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// USER & AUTHENTICATION
+// ============================================
+
+enum UserRole {
+  admin
+  socio
+}
+
+enum UserStatus {
+  active
+  inactive
+}
+
+model User {
+  id            String     @id @default(uuid())
+  email         String     @unique
+  password      String
+  name          String
+  role          UserRole   @default(socio)
+  status        UserStatus @default(active)
+  memberId      String?    @unique
+  lastLogin     DateTime?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  // Relations
+  cooperativeId String?
+  cooperative   Cooperative? @relation(fields: [cooperativeId], references: [id])
+
+  uploadHistory    UploadHistory[]
+  sentNotifications Notification[] @relation("SentNotifications")
+  receivedNotifications UserNotification[]
+  activityLogs     ActivityLog[]
+
+  @@index([email])
+  @@index([cooperativeId])
+}
+
+model ActivityLog {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  action    String
+  details   String?
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+}
+
+// ============================================
+// COOPERATIVE & SETTINGS
+// ============================================
+
+model Cooperative {
+  id        String   @id @default(uuid())
+  name      String
+  type      String?  // ahorro-credito, vivienda, consumo, produccion, servicios, otra
+  ruc       String?
+  address   String?
+  phone     String?
+  email     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  users              User[]
+  odooConfig         OdooConfig?
+  settings           Settings?
+  balanceSheetEntries BalanceSheetEntry[]
+  cashFlowEntries    CashFlowEntry[]
+  membershipFees     MembershipFee[]
+  financialRatios    FinancialRatio[]
+  uploadHistory      UploadHistory[]
+  notifications      Notification[]
+  periods            Period[]
+}
+
+model OdooConfig {
+  id            String   @id @default(uuid())
+  cooperativeId String   @unique
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+
+  url           String
+  database      String
+  username      String
+  apiKey        String   // Encrypted in production
+  isConnected   Boolean  @default(false)
+  lastSync      DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model Settings {
+  id            String   @id @default(uuid())
+  cooperativeId String   @unique
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+
+  // Notifications
+  emailNotifications   Boolean @default(true)
+  uploadNotifications  Boolean @default(true)
+  paymentReminders     Boolean @default(false)
+
+  // Security
+  twoFactorAuth        Boolean @default(false)
+  sessionTimeout       Boolean @default(true)
+  sessionTimeoutMinutes Int    @default(30)
+
+  // Data
+  autoBackup           Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ============================================
+// FINANCIAL DATA
+// ============================================
+
+model Period {
+  id            String   @id @default(uuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+
+  year          Int
+  month         Int
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  @@unique([cooperativeId, year, month])
+  @@index([cooperativeId])
+}
+
+enum BalanceCategory {
+  assets
+  liabilities
+  equity
+}
+
+model BalanceSheetEntry {
+  id            String   @id @default(uuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+
+  year          Int
+  month         Int
+
+  accountCode   String
+  accountName   String
+  category      BalanceCategory
+  subcategory   String?
+
+  initialDebit  Float    @default(0)
+  initialCredit Float    @default(0)
+  periodDebit   Float    @default(0)
+  periodCredit  Float    @default(0)
+  finalDebit    Float    @default(0)
+  finalCredit   Float    @default(0)
+
+  odooId        String?  // Reference to Odoo record
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([cooperativeId, year, month])
+  @@index([category])
+}
+
+enum CashFlowCategory {
+  operating
+  investing
+  financing
+}
+
+model CashFlowEntry {
+  id            String   @id @default(uuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+
+  year          Int
+  month         Int
+
+  description   String
+  category      CashFlowCategory
+  amount        Float
+
+  odooId        String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([cooperativeId, year, month])
+  @@index([category])
+}
+
+enum FeeStatus {
+  up_to_date
+  with_debt
+}
+
+model MembershipFee {
+  id            String   @id @default(uuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+
+  year          Int
+  month         Int
+
+  memberId      String
+  memberName    String
+
+  expectedContribution Float
+  paymentMade          Float   @default(0)
+  debt                 Float   @default(0)
+  status               FeeStatus @default(with_debt)
+
+  odooPartnerId String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([cooperativeId, year, month])
+  @@index([memberId])
+  @@index([status])
+}
+
+model FinancialRatio {
+  id            String   @id @default(uuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+
+  year          Int
+  month         Int
+
+  name          String   // Current Ratio, Debt to Assets, ROE, Operating Margin
+  value         Float
+  trend         String?  // up, down, stable
+  description   String?
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([cooperativeId, year, month, name])
+  @@index([cooperativeId, year, month])
+}
+
+// ============================================
+// UPLOAD / SYNC HISTORY
+// ============================================
+
+enum UploadStatus {
+  success
+  partial
+  failed
+}
+
+enum UploadModule {
+  balance_sheet
+  cash_flow
+  membership_fees
+  ratios
+  all
+}
+
+model UploadHistory {
+  id            String   @id @default(uuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+
+  year          Int
+  month         Int
+
+  module        UploadModule
+  status        UploadStatus
+  recordsCount  Int      @default(0)
+  errorMessage  String?
+
+  createdAt     DateTime @default(now())
+
+  @@index([cooperativeId])
+  @@index([createdAt])
+}
+
+// ============================================
+// NOTIFICATIONS
+// ============================================
+
+enum NotificationRecipientType {
+  all
+  with_debt
+  specific
+}
+
+model Notification {
+  id            String   @id @default(uuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+
+  senderId      String
+  sender        User     @relation("SentNotifications", fields: [senderId], references: [id])
+
+  title         String
+  message       String
+  recipientType NotificationRecipientType
+
+  createdAt     DateTime @default(now())
+
+  // Relations
+  recipients    UserNotification[]
+
+  @@index([cooperativeId])
+  @@index([createdAt])
+}
+
+model UserNotification {
+  id             String   @id @default(uuid())
+  notificationId String
+  notification   Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  isRead         Boolean  @default(false)
+  readAt         DateTime?
+
+  createdAt      DateTime @default(now())
+
+  @@unique([notificationId, userId])
+  @@index([userId])
+  @@index([isRead])
+}
