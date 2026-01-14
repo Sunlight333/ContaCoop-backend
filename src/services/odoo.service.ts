@@ -16,9 +16,15 @@ class OdooService {
   // Authenticate with Odoo and get user ID
   async authenticate(config: OdooConnection): Promise<number> {
     return new Promise((resolve, reject) => {
-      const commonClient = xmlrpc.createClient({
-        url: `${config.url}/xmlrpc/2/common`,
-      });
+      const isHttps = config.url.toLowerCase().startsWith('https://');
+      const commonClient = isHttps
+        ? xmlrpc.createSecureClient({
+            url: `${config.url}/xmlrpc/2/common`,
+            rejectUnauthorized: false,
+          } as any)
+        : xmlrpc.createClient({
+            url: `${config.url}/xmlrpc/2/common`,
+          });
 
       commonClient.methodCall(
         'authenticate',
@@ -48,9 +54,15 @@ class OdooService {
     }
 
     return new Promise((resolve, reject) => {
-      const objectClient = xmlrpc.createClient({
-        url: `${config.url}/xmlrpc/2/object`,
-      });
+      const isHttps = config.url.toLowerCase().startsWith('https://');
+      const objectClient = isHttps
+        ? xmlrpc.createSecureClient({
+            url: `${config.url}/xmlrpc/2/object`,
+            rejectUnauthorized: false,
+          } as any)
+        : xmlrpc.createClient({
+            url: `${config.url}/xmlrpc/2/object`,
+          });
 
       objectClient.methodCall(
         'execute_kw',
