@@ -168,9 +168,30 @@ export async function getOdooStatus(req: AuthRequest, res: Response): Promise<vo
       return;
     }
 
-    const status = await odooService.getStatus(cooperativeId);
+    const config = await prisma.odooConfig.findUnique({
+      where: { cooperativeId },
+    });
 
-    sendSuccess(res, status);
+    if (!config) {
+      sendSuccess(res, {
+        url: '',
+        database: '',
+        username: '',
+        apiKey: '',
+        isConnected: false,
+        lastSync: null,
+      });
+      return;
+    }
+
+    sendSuccess(res, {
+      url: config.url,
+      database: config.database,
+      username: config.username,
+      apiKey: config.apiKey,
+      isConnected: config.isConnected,
+      lastSync: config.lastSync?.toISOString() || null,
+    });
   } catch (error) {
     sendError(res, 'Failed to get Odoo status', 500);
   }
