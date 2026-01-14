@@ -278,7 +278,7 @@ class OdooService {
         amount: number;
         payment_type: string;
         date: string;
-        ref: string;
+        payment_reference: string;
       }>(
         config,
         'account.payment',
@@ -287,13 +287,13 @@ class OdooService {
           ['date', '<=', endDate.toISOString().split('T')[0]],
           ['state', '=', 'posted'],
         ],
-        ['name', 'amount', 'payment_type', 'date', 'ref'],
+        ['name', 'amount', 'payment_type', 'date', 'payment_reference'],
         {}
       );
 
       // Transform to cash flow entries
       const transformedRecords = payments.map((p) => ({
-        description: p.name || p.ref || 'Payment',
+        description: p.name || p.payment_reference || 'Payment',
         amount: p.payment_type === 'inbound' ? p.amount : -p.amount,
         category: 'operating', // Simplified - in real app, categorize based on account
         odooId: String(p.id),
