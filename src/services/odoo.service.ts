@@ -47,7 +47,8 @@ class OdooService {
     config: OdooConnection,
     model: string,
     method: string,
-    args: unknown[]
+    args: unknown[],
+    kwargs: Record<string, any> = {}
   ): Promise<T> {
     if (!config.uid) {
       config.uid = await this.authenticate(config);
@@ -64,9 +65,10 @@ class OdooService {
             url: `${config.url}/xmlrpc/2/object`,
           });
 
+      // execute_kw signature: [db, uid, password, model, method, args, kwargs]
       objectClient.methodCall(
         'execute_kw',
-        [config.database, config.uid, config.apiKey, model, method, args],
+        [config.database, config.uid, config.apiKey, model, method, args, kwargs],
         (error: any, result: T) => {
           if (error) {
             reject(new Error(`Odoo execute failed: ${error?.message || error}`));
@@ -86,10 +88,14 @@ class OdooService {
     fields: string[],
     options: { limit?: number; offset?: number; order?: string } = {}
   ): Promise<T[]> {
-    return this.execute<T[]>(config, model, 'search_read', [
-      domain,
-      { fields, ...options },
-    ]);
+    // Odoo search_read expects: domain as positional arg, then fields, limit, offset, order as kwargs
+    const kwargs: Record<string, any> = {};
+    if (fields && fields.length > 0) kwargs.fields = fields;
+    if (options.limit !== undefined) kwargs.limit = options.limit;
+    if (options.offset !== undefined) kwargs.offset = options.offset;
+    if (options.order) kwargs.order = options.order;
+
+    return this.execute<T[]>(config, model, 'search_read', [domain], kwargs);
   }
 
   // Get Odoo configuration for a cooperative
