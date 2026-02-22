@@ -6,6 +6,7 @@ import {
   uploadCashFlow,
   uploadMembershipFees,
   uploadRatios,
+  uploadUsers,
   getUploadHistory,
   getLatestUpload,
 } from '../controllers/upload.controller.js';
@@ -48,6 +49,7 @@ router.post('/balance-sheet', upload.single('file'), uploadBalanceSheet);
 router.post('/cash-flow', upload.single('file'), uploadCashFlow);
 router.post('/membership-fees', upload.single('file'), uploadMembershipFees);
 router.post('/ratios', upload.single('file'), uploadRatios);
+router.post('/users', upload.single('file'), uploadUsers);
 
 // History
 router.get('/history', getUploadHistory);

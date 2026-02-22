@@ -4,6 +4,7 @@ import prisma from '../config/database.js';
 import { sendSuccess, sendError } from '../utils/response.js';
 import { AuthRequest, UploadResult } from '../types/index.js';
 import { BalanceCategory, CashFlowCategory, FeeStatus } from '@prisma/client';
+import { hashPassword, generateRandomPassword } from '../utils/password.js';
 
 // Helper function to parse Excel/CSV file
 function parseFile(buffer: Buffer, filename: string): Record<string, any>[] {
@@ -59,6 +60,13 @@ const ratiosColumnMap: Record<string, string> = {
   valor: 'value',
   tendencia: 'trend',
   descripcion: 'description',
+};
+
+const userImportColumnMap: Record<string, string> = {
+  nombre: 'name',
+  email: 'email',
+  rol: 'role',
+  contrasena: 'password',
 };
 
 // Map row using column mapping
@@ -566,6 +574,170 @@ export async function uploadRatios(req: AuthRequest, res: Response): Promise<voi
   } catch (error) {
     console.error('Upload ratios error:', error);
     sendError(res, 'Failed to upload ratios', 500);
+  }
+}
+
+// Upload users from file (bulk import)
+export async function uploadUsers(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const cooperativeId = req.body.cooperativeId || req.query.cooperativeId as string || req.user?.cooperativeId;
+
+    if (!cooperativeId) {
+      sendError(res, 'Cooperative ID required', 400);
+      return;
+    }
+
+    const file = (req as any).file;
+    if (!file) {
+      sendError(res, 'No file uploaded', 400);
+      return;
+    }
+
+    // Parse file
+    let records: Record<string, any>[];
+    try {
+      const rawData = parseFile(file.buffer, file.originalname);
+      records = rawData.map(row => mapRow(row, userImportColumnMap));
+    } catch (error) {
+      sendError(res, 'Failed to parse file. Please check the file format.', 400);
+      return;
+    }
+
+    // Filter out empty rows
+    const validRows = records.filter(r => {
+      const name = String(r.name || '').trim();
+      const email = String(r.email || '').trim();
+      return name || email;
+    });
+
+    if (validRows.length === 0) {
+      sendError(res, 'No valid records found in file', 400);
+      return;
+    }
+
+    // Pre-fetch existing emails for uniqueness check
+    const existingUsers = await prisma.user.findMany({
+      select: { email: true },
+    });
+    const existingEmails = new Set(existingUsers.map((u: { email: string }) => u.email.toLowerCase()));
+
+    // Get next memberId number
+    const allUsersWithMemberId = await prisma.user.findMany({
+      where: { memberId: { not: null } },
+      select: { memberId: true },
+    });
+    const memberNumbers = allUsersWithMemberId
+      .map((u: { memberId: string | null }) => parseInt(u.memberId?.replace('M', '') || '0'))
+      .filter((n: number) => !isNaN(n));
+    let nextMemberNumber = memberNumbers.length > 0 ? Math.max(...memberNumbers) + 1 : 1;
+
+    // Track results
+    const created: Array<{ name: string; email: string; temporaryPassword: string }> = [];
+    const skipped: Array<{ row: number; email: string; reason: string }> = [];
+    const errors: Array<{ row: number; email: string; reason: string }> = [];
+    const processedEmails = new Set<string>();
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    for (let i = 0; i < validRows.length; i++) {
+      const row = validRows[i];
+      const rowNum = i + 1;
+      const name = String(row.name || '').trim();
+      const email = String(row.email || '').trim().toLowerCase();
+      let role = String(row.role || 'socio').trim().toLowerCase();
+      const password = String(row.password || '').trim();
+
+      // Validate name
+      if (!name) {
+        errors.push({ row: rowNum, email: email || '', reason: 'Nombre es requerido' });
+        continue;
+      }
+
+      // Validate email
+      if (!email) {
+        errors.push({ row: rowNum, email: '', reason: 'Email es requerido' });
+        continue;
+      }
+
+      if (!emailRegex.test(email)) {
+        errors.push({ row: rowNum, email, reason: 'Email inválido' });
+        continue;
+      }
+
+      // Check duplicate within batch
+      if (processedEmails.has(email)) {
+        skipped.push({ row: rowNum, email, reason: 'Email duplicado en archivo' });
+        continue;
+      }
+
+      // Check duplicate against DB
+      if (existingEmails.has(email)) {
+        skipped.push({ row: rowNum, email, reason: 'Email ya registrado' });
+        continue;
+      }
+
+      // Normalize role
+      if (role === 'administrador' || role === 'admin') {
+        role = 'admin';
+      } else {
+        role = 'socio';
+      }
+
+      // Generate or use provided password
+      const userPassword = password || generateRandomPassword();
+      const hashedPassword = await hashPassword(userPassword);
+
+      // Generate memberId
+      const memberId = `M${nextMemberNumber.toString().padStart(3, '0')}`;
+      nextMemberNumber++;
+
+      try {
+        await prisma.user.create({
+          data: {
+            email,
+            name,
+            password: hashedPassword,
+            role: role as any,
+            memberId,
+            cooperativeId,
+          },
+        });
+
+        created.push({ name, email, temporaryPassword: userPassword });
+        processedEmails.add(email);
+        existingEmails.add(email);
+      } catch (err: any) {
+        if (err.code === 'P2002') {
+          skipped.push({ row: rowNum, email, reason: 'Email ya registrado' });
+        } else {
+          errors.push({ row: rowNum, email, reason: 'Error al crear usuario' });
+        }
+      }
+    }
+
+    // Log activity
+    await prisma.activityLog.create({
+      data: {
+        userId: req.user!.id,
+        action: 'Importó usuarios masivamente',
+        details: `Creados: ${created.length}, Omitidos: ${skipped.length}, Errores: ${errors.length}`,
+        ipAddress: req.ip,
+      },
+    });
+
+    const status = errors.length === 0 && skipped.length === 0 ? 'success' : (created.length > 0 ? 'partial' : 'failed');
+
+    sendSuccess(res, {
+      status,
+      message: `Se crearon ${created.length} usuarios. ${skipped.length} omitidos. ${errors.length} errores.`,
+      recordsCount: created.length,
+      created,
+      skipped,
+      errors,
+    });
+  } catch (error) {
+    console.error('Upload users error:', error);
+    sendError(res, 'Failed to upload users', 500);
   }
 }
 
