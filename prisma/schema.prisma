@@ -96,6 +96,7 @@ model OdooConfig {
   database      String
   username      String
   apiKey        String   // Encrypted in production
+  companyId     Int?     // Odoo company (res.company) ID for multi-company filtering
   isConnected   Boolean  @default(false)
   lastSync      DateTime?
   createdAt     DateTime @default(now())

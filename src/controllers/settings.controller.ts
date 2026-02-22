@@ -189,6 +189,7 @@ export async function getOdooStatus(req: AuthRequest, res: Response): Promise<vo
       database: config.database,
       username: config.username,
       apiKey: config.apiKey,
+      companyId: config.companyId,
       isConnected: config.isConnected,
       lastSync: config.lastSync?.toISOString() || null,
     });
@@ -207,14 +208,14 @@ export async function saveOdooConfig(req: AuthRequest, res: Response): Promise<v
       return;
     }
 
-    const { url, database, username, apiKey }: OdooConfigInput = req.body;
+    const { url, database, username, apiKey, companyId }: OdooConfigInput = req.body;
 
     if (!url || !database || !username || !apiKey) {
       sendError(res, 'All Odoo configuration fields are required', 400);
       return;
     }
 
-    await odooService.saveConfig(cooperativeId, { url, database, username, apiKey });
+    await odooService.saveConfig(cooperativeId, { url, database, username, apiKey, companyId });
 
     await prisma.activityLog.create({
       data: {
@@ -250,6 +251,23 @@ export async function testOdooConnection(req: AuthRequest, res: Response): Promi
     }
   } catch (error) {
     sendError(res, 'Failed to test connection', 500);
+  }
+}
+
+// Fetch Odoo companies
+export async function getOdooCompanies(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const { url, database, username, apiKey }: OdooConfigInput = req.body;
+
+    if (!url || !database || !username || !apiKey) {
+      sendError(res, 'All Odoo configuration fields are required', 400);
+      return;
+    }
+
+    const companies = await odooService.fetchCompanies({ url, database, username, apiKey });
+    sendSuccess(res, companies, 'Companies fetched successfully');
+  } catch (error) {
+    sendError(res, 'Failed to fetch Odoo companies', 500);
   }
 }
 

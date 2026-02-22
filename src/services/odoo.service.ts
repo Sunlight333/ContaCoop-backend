@@ -7,6 +7,7 @@ interface OdooConnection {
   database: string;
   username: string;
   apiKey: string;
+  companyId?: number;
   uid?: number;
 }
 
@@ -119,6 +120,7 @@ class OdooService {
       database: odooConfig.database,
       username: odooConfig.username,
       apiKey: odooConfig.apiKey,
+      companyId: odooConfig.companyId || undefined,
     };
 
     this.connections.set(cooperativeId, connection);
@@ -159,6 +161,7 @@ class OdooService {
         database: config.database,
         username: config.username,
         apiKey: config.apiKey,
+        companyId: config.companyId || null,
         isConnected: true,
         updatedAt: new Date(),
       },
@@ -168,6 +171,7 @@ class OdooService {
         database: config.database,
         username: config.username,
         apiKey: config.apiKey,
+        companyId: config.companyId || null,
         isConnected: true,
       },
     });
@@ -189,7 +193,7 @@ class OdooService {
     };
   }
 
-  // Fetch balance sheet data from Odoo
+  // Fetch balance sheet data from Odoo (cumulative balances up to end of period)
   async fetchBalanceSheet(
     cooperativeId: string,
     year: number,
@@ -201,11 +205,19 @@ class OdooService {
         return { success: false, records: [], error: 'Odoo not configured' };
       }
 
-      // Calculate date range for the period
-      const startDate = new Date(year, month - 1, 1);
-      const endDate = new Date(year, month, 0);
+      // Balance General shows cumulative balances: all entries up to end of the month
+      const endDate = new Date(year, month, 0); // Last day of the month
 
-      // Fetch account move lines from Odoo
+      // Build domain with optional company filter
+      const moveLineDomain: unknown[] = [
+        ['date', '<=', endDate.toISOString().split('T')[0]],
+        ['parent_state', '=', 'posted'],
+      ];
+      if (config.companyId) {
+        moveLineDomain.push(['company_id', '=', config.companyId]);
+      }
+
+      // Fetch ALL posted account move lines up to end of period (cumulative)
       const records = await this.searchRead<{
         id: number;
         account_id: [number, string];
@@ -217,16 +229,15 @@ class OdooService {
       }>(
         config,
         'account.move.line',
-        [
-          ['date', '>=', startDate.toISOString().split('T')[0]],
-          ['date', '<=', endDate.toISOString().split('T')[0]],
-          ['parent_state', '=', 'posted'],
-        ],
+        moveLineDomain,
         ['account_id', 'date', 'debit', 'credit', 'name', 'ref'],
         { order: 'account_id' }
       );
 
       // Also fetch account information to categorize
+      const accountDomain: unknown[] = config.companyId
+        ? [['company_id', '=', config.companyId]]
+        : [];
       const accounts = await this.searchRead<{
         id: number;
         code: string;
@@ -235,7 +246,7 @@ class OdooService {
       }>(
         config,
         'account.account',
-        [],
+        accountDomain,
         ['code', 'name', 'account_type'],
         {}
       );
@@ -256,7 +267,7 @@ class OdooService {
     }
   }
 
-  // Fetch cash flow data from Odoo
+  // Fetch cash flow data from Odoo (matching Odoo's Estado de flujo de efectivo)
   async fetchCashFlow(
     cooperativeId: string,
     year: number,
@@ -271,7 +282,87 @@ class OdooService {
       const startDate = new Date(year, month - 1, 1);
       const endDate = new Date(year, month, 0);
 
-      // Fetch payment records
+      // Build domain with optional company filter
+      const moveLineDomain: unknown[] = [
+        ['date', '>=', startDate.toISOString().split('T')[0]],
+        ['date', '<=', endDate.toISOString().split('T')[0]],
+        ['parent_state', '=', 'posted'],
+      ];
+      if (config.companyId) {
+        moveLineDomain.push(['company_id', '=', config.companyId]);
+      }
+
+      // Fetch account move lines for the period to build cash flow
+      const moveLines = await this.searchRead<{
+        id: number;
+        account_id: [number, string];
+        date: string;
+        debit: number;
+        credit: number;
+        name: string;
+        ref: string;
+        journal_id: [number, string];
+      }>(
+        config,
+        'account.move.line',
+        moveLineDomain,
+        ['account_id', 'date', 'debit', 'credit', 'name', 'ref', 'journal_id'],
+        { order: 'account_id' }
+      );
+
+      // Fetch account info for categorization
+      const accountDomain: unknown[] = config.companyId
+        ? [['company_id', '=', config.companyId]]
+        : [];
+      const accounts = await this.searchRead<{
+        id: number;
+        code: string;
+        name: string;
+        account_type: string;
+      }>(
+        config,
+        'account.account',
+        accountDomain,
+        ['code', 'name', 'account_type'],
+        {}
+      );
+
+      const accountMap = new Map(accounts.map((a) => [a.id, a]));
+
+      // Categorize cash flow entries based on account types
+      // Operating: revenue, expense, receivable, payable accounts
+      // Investing: fixed assets, non-current assets
+      // Financing: equity, non-current liabilities, loans
+      const cashFlowGroups: Record<string, { description: string; amount: number; category: string }> = {};
+
+      for (const line of moveLines) {
+        const accountId = line.account_id[0];
+        const account = accountMap.get(accountId);
+        if (!account) continue;
+
+        const cashFlowCategory = this.mapAccountTypeToCashFlowCategory(account.account_type);
+        const key = `${account.code}-${cashFlowCategory}`;
+        const netAmount = line.debit - line.credit;
+
+        if (!cashFlowGroups[key]) {
+          cashFlowGroups[key] = {
+            description: account.name,
+            amount: 0,
+            category: cashFlowCategory,
+          };
+        }
+        cashFlowGroups[key].amount += netAmount;
+      }
+
+      // Also fetch payment records for direct cash movements
+      const paymentDomain: unknown[] = [
+        ['date', '>=', startDate.toISOString().split('T')[0]],
+        ['date', '<=', endDate.toISOString().split('T')[0]],
+        ['state', '=', 'posted'],
+      ];
+      if (config.companyId) {
+        paymentDomain.push(['company_id', '=', config.companyId]);
+      }
       const payments = await this.searchRead<{
         id: number;
         name: string;
@@ -282,22 +373,31 @@ class OdooService {
       }>(
         config,
         'account.payment',
-        [
-          ['date', '>=', startDate.toISOString().split('T')[0]],
-          ['date', '<=', endDate.toISOString().split('T')[0]],
-          ['state', '=', 'posted'],
-        ],
+        paymentDomain,
         ['name', 'amount', 'payment_type', 'date', 'payment_reference'],
         {}
       );
 
-      // Transform to cash flow entries
-      const transformedRecords = payments.map((p) => ({
-        description: p.name || p.payment_reference || 'Payment',
-        amount: p.payment_type === 'inbound' ? p.amount : -p.amount,
-        category: 'operating', // Simplified - in real app, categorize based on account
-        odooId: String(p.id),
-      }));
+      // Build final records from grouped account entries
+      const transformedRecords = Object.values(cashFlowGroups)
+        .filter(entry => Math.abs(entry.amount) > 0.01)
+        .map((entry, idx) => ({
+          description: entry.description,
+          amount: Math.round(entry.amount * 100) / 100,
+          category: entry.category,
+          odooId: `cf-${idx}`,
+        }));
+
+      // If no move lines found, fall back to payment records
+      if (transformedRecords.length === 0 && payments.length > 0) {
+        const paymentRecords = payments.map((p) => ({
+          description: p.name || p.payment_reference || 'Pago',
+          amount: p.payment_type === 'inbound' ? p.amount : -p.amount,
+          category: 'operating',
+          odooId: String(p.id),
+        }));
+        return { success: true, records: paymentRecords };
+      }
 
       return { success: true, records: transformedRecords };
     } catch (error) {
@@ -321,7 +421,14 @@ class OdooService {
         return { success: false, records: [], error: 'Odoo not configured' };
       }
 
-      // Fetch partners (members)
+      // Fetch partners (members) with optional company filter
+      const partnerDomain: unknown[] = [
+        ['is_company', '=', false],
+        ['customer_rank', '>', 0],
+      ];
+      if (config.companyId) {
+        partnerDomain.push(['company_id', '=', config.companyId]);
+      }
       const partners = await this.searchRead<{
         id: number;
         name: string;
@@ -331,7 +438,7 @@ class OdooService {
       }>(
         config,
         'res.partner',
-        [['is_company', '=', false], ['customer_rank', '>', 0]],
+        partnerDomain,
         ['name', 'ref', 'credit', 'debit'],
         {}
       );
@@ -411,6 +518,19 @@ class OdooService {
     }));
   }
 
+  // Map Odoo account type to cash flow category (operating, investing, financing)
+  private mapAccountTypeToCashFlowCategory(accountType: string): 'operating' | 'investing' | 'financing' {
+    // Investing: fixed assets, non-current assets
+    const investingTypes = ['asset_non_current', 'asset_fixed'];
+    // Financing: equity, non-current liabilities
+    const financingTypes = ['equity', 'equity_unaffected', 'liability_non_current'];
+    // Everything else is operating (receivable, payable, cash, current assets/liabilities, income, expense)
+
+    if (investingTypes.includes(accountType)) return 'investing';
+    if (financingTypes.includes(accountType)) return 'financing';
+    return 'operating';
+  }
+
   // Map Odoo account type to our categories
   private mapAccountTypeToCategory(accountType: string): 'assets' | 'liabilities' | 'equity' {
     const assetTypes = [
@@ -435,6 +555,29 @@ class OdooService {
 
     // Default to assets for income/expense (they affect equity)
     return 'assets';
+  }
+
+  // Fetch available companies from Odoo
+  async fetchCompanies(config: OdooConfigInput): Promise<{ id: number; name: string }[]> {
+    const connection: OdooConnection = {
+      url: config.url,
+      database: config.database,
+      username: config.username,
+      apiKey: config.apiKey,
+    };
+
+    const companies = await this.searchRead<{
+      id: number;
+      name: string;
+    }>(
+      connection,
+      'res.company',
+      [],
+      ['name'],
+      {}
+    );
+
+    return companies;
   }
 
   // Update last sync timestamp

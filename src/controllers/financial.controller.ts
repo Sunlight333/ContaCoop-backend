@@ -72,12 +72,8 @@ export async function getDashboardKPIs(req: AuthRequest, res: Response): Promise
 
     const netCashFlow = cashFlowData.reduce((sum, e) => sum + e.amount, 0);
 
-    // Get ratios
-    const ratios = await prisma.financialRatio.findMany({
-      where: { cooperativeId, year, month },
-    });
-
-    const debtRatio = ratios.find((r) => r.name === 'Debt to Assets')?.value || 0;
+    // Calculate debt ratio from balance sheet
+    const debtRatio = totalAssets !== 0 ? totalLiabilities / totalAssets : 0;
 
     // Get previous period for comparison
     const prevMonth = month === 1 ? 12 : month - 1;
@@ -368,7 +364,121 @@ export async function getMyMembershipFees(req: AuthRequest, res: Response): Prom
   }
 }
 
-// Financial Ratios
+// Helper: Calculate financial ratios from balance sheet and cash flow data
+async function calculateRatiosForPeriod(cooperativeId: string, year: number, month: number) {
+  // Fetch balance sheet entries
+  const balanceEntries = await prisma.balanceSheetEntry.findMany({
+    where: { cooperativeId, year, month },
+  });
+
+  if (balanceEntries.length === 0) return [];
+
+  // Fetch cash flow entries for operating income calculations
+  const cashFlowEntries = await prisma.cashFlowEntry.findMany({
+    where: { cooperativeId, year, month },
+  });
+
+  // Current asset subcategories (from Odoo and manual imports)
+  const currentAssetSubs = [
+    'asset_receivable', 'asset_cash', 'asset_current', 'asset_prepayments',
+    'current_assets', 'cash', 'receivable', 'current', 'prepayments',
+    'activo corriente',
+  ];
+
+  // Current liability subcategories
+  const currentLiabilitySubs = [
+    'liability_payable', 'liability_credit_card', 'liability_current',
+    'current_liabilities', 'payable',
+    'pasivo corriente',
+  ];
+
+  // Calculate balance sheet components
+  const totalAssets = balanceEntries
+    .filter(e => e.category === 'assets')
+    .reduce((sum, e) => sum + e.finalDebit - e.finalCredit, 0);
+
+  const totalLiabilities = balanceEntries
+    .filter(e => e.category === 'liabilities')
+    .reduce((sum, e) => sum + e.finalCredit - e.finalDebit, 0);
+
+  const totalEquity = balanceEntries
+    .filter(e => e.category === 'equity')
+    .reduce((sum, e) => sum + e.finalCredit - e.finalDebit, 0);
+
+  const currentAssets = balanceEntries
+    .filter(e => e.category === 'assets' && e.subcategory && currentAssetSubs.includes(e.subcategory.toLowerCase()))
+    .reduce((sum, e) => sum + e.finalDebit - e.finalCredit, 0);
+
+  const currentLiabilities = balanceEntries
+    .filter(e => e.category === 'liabilities' && e.subcategory && currentLiabilitySubs.includes(e.subcategory.toLowerCase()))
+    .reduce((sum, e) => sum + e.finalCredit - e.finalDebit, 0);
+
+  // If no subcategory classification available, use all assets/liabilities as fallback
+  const effectiveCurrentAssets = currentAssets > 0 ? currentAssets : totalAssets;
+  const effectiveCurrentLiabilities = currentLiabilities > 0 ? currentLiabilities : totalLiabilities;
+
+  // Cash flow operating data for income ratios
+  const operatingEntries = cashFlowEntries.filter(e => e.category === 'operating');
+  const operatingRevenue = operatingEntries
+    .filter(e => e.amount > 0)
+    .reduce((sum, e) => sum + e.amount, 0);
+  const netOperatingIncome = operatingEntries.reduce((sum, e) => sum + e.amount, 0);
+
+  // Calculate 4 ratios
+  const ratios = [];
+
+  // 1. Liquidez Corriente (Current Ratio) = Current Assets / Current Liabilities
+  const currentRatio = effectiveCurrentLiabilities !== 0
+    ? effectiveCurrentAssets / effectiveCurrentLiabilities
+    : 0;
+  ratios.push({
+    id: `${cooperativeId}-${year}-${month}-current-ratio`,
+    name: 'Current Ratio',
+    value: Math.round(currentRatio * 100) / 100,
+    trend: currentRatio >= 1.5 ? 'up' : currentRatio >= 1 ? 'stable' : 'down',
+    description: 'Capacidad de pago a corto plazo',
+  });
+
+  // 2. Endeudamiento (Debt to Assets) = Total Liabilities / Total Assets
+  const debtToAssets = totalAssets !== 0
+    ? totalLiabilities / totalAssets
+    : 0;
+  ratios.push({
+    id: `${cooperativeId}-${year}-${month}-debt-to-assets`,
+    name: 'Debt to Assets',
+    value: Math.round(debtToAssets * 1000) / 1000,
+    trend: debtToAssets < 0.5 ? 'up' : debtToAssets < 0.7 ? 'stable' : 'down',
+    description: 'Nivel de endeudamiento',
+  });
+
+  // 3. Rentabilidad del Patrimonio (ROE) = Net Operating Income / Total Equity
+  const roe = totalEquity !== 0
+    ? netOperatingIncome / totalEquity
+    : 0;
+  ratios.push({
+    id: `${cooperativeId}-${year}-${month}-roe`,
+    name: 'Return on Equity',
+    value: Math.round(roe * 1000) / 1000,
+    trend: roe >= 0.15 ? 'up' : roe >= 0.08 ? 'stable' : 'down',
+    description: 'Rentabilidad para los socios',
+  });
+
+  // 4. Margen Operacional (Operating Margin) = Net Operating Income / Operating Revenue
+  const operatingMargin = operatingRevenue !== 0
+    ? netOperatingIncome / operatingRevenue
+    : 0;
+  ratios.push({
+    id: `${cooperativeId}-${year}-${month}-operating-margin`,
+    name: 'Operating Margin',
+    value: Math.round(operatingMargin * 1000) / 1000,
+    trend: operatingMargin >= 0.2 ? 'up' : operatingMargin >= 0.1 ? 'stable' : 'down',
+    description: 'Eficiencia operativa',
+  });
+
+  return ratios;
+}
+
+// Financial Ratios - calculated from Balance Sheet and Cash Flow data
 export async function getFinancialRatios(req: AuthRequest, res: Response): Promise<void> {
   try {
     const cooperativeId = req.query.cooperativeId as string || req.user?.cooperativeId;
@@ -380,11 +490,10 @@ export async function getFinancialRatios(req: AuthRequest, res: Response): Promi
       return;
     }
 
-    const ratios = await prisma.financialRatio.findMany({
-      where: { cooperativeId, year, month },
-    });
+    // Calculate ratios from balance sheet data
+    const ratios = await calculateRatiosForPeriod(cooperativeId, year, month);
 
-    // Get history for each ratio (last 6 months)
+    // Get 6-month history for each ratio
     const ratiosWithHistory = await Promise.all(
       ratios.map(async (ratio) => {
         const history = [];
@@ -393,22 +502,17 @@ export async function getFinancialRatios(req: AuthRequest, res: Response): Promi
           const hYear = date.getFullYear();
           const hMonth = date.getMonth() + 1;
 
-          const historyEntry = await prisma.financialRatio.findFirst({
-            where: { cooperativeId, year: hYear, month: hMonth, name: ratio.name },
-          });
+          const periodRatios = await calculateRatiosForPeriod(cooperativeId, hYear, hMonth);
+          const matched = periodRatios.find(r => r.name === ratio.name);
 
           history.push({
             period: `${hMonth}/${hYear}`,
-            value: historyEntry?.value || 0,
+            value: matched?.value || 0,
           });
         }
 
         return {
-          id: ratio.id,
-          name: ratio.name,
-          value: ratio.value,
-          trend: ratio.trend,
-          description: ratio.description,
+          ...ratio,
           history,
         };
       })
@@ -420,7 +524,7 @@ export async function getFinancialRatios(req: AuthRequest, res: Response): Promi
   }
 }
 
-// Ratio History
+// Ratio History - calculated from Balance Sheet and Cash Flow data
 export async function getRatioHistory(req: AuthRequest, res: Response): Promise<void> {
   try {
     const cooperativeId = req.query.cooperativeId as string || req.user?.cooperativeId;
@@ -439,15 +543,13 @@ export async function getRatioHistory(req: AuthRequest, res: Response): Promise<
       const year = date.getFullYear();
       const month = date.getMonth() + 1;
 
-      const ratios = await prisma.financialRatio.findMany({
-        where: { cooperativeId, year, month },
-      });
+      const ratios = await calculateRatiosForPeriod(cooperativeId, year, month);
 
       history.push({
         year,
         month,
         period: `${month}/${year}`,
-        ratios: ratios.map((r) => ({ name: r.name, value: r.value })),
+        ratios: ratios.map(r => ({ name: r.name, value: r.value })),
       });
     }
 

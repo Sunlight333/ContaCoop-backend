@@ -104,6 +104,7 @@ export interface OdooConfigInput {
   database: string;
   username: string;
   apiKey: string;
+  companyId?: number;
 }
 
 // Notification

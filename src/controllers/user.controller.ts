@@ -35,6 +35,9 @@ export async function getUsers(req: AuthRequest, res: Response): Promise<void> {
         memberId: true,
         lastLogin: true,
         createdAt: true,
+        cooperative: {
+          select: { id: true, name: true },
+        },
       },
       orderBy: { name: 'asc' },
     });
@@ -273,6 +276,58 @@ export async function resetUserPassword(req: AuthRequest, res: Response): Promis
     );
   } catch (error) {
     sendError(res, 'Failed to reset password', 500);
+  }
+}
+
+// Change user cooperative assignment
+export async function changeUserCooperative(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const { userId } = req.params;
+    const { cooperativeId } = req.body;
+
+    if (!cooperativeId) {
+      sendError(res, 'Cooperative ID is required', 400);
+      return;
+    }
+
+    // Verify the cooperative exists
+    const cooperative = await prisma.cooperative.findUnique({
+      where: { id: cooperativeId },
+      select: { id: true, name: true },
+    });
+
+    if (!cooperative) {
+      sendError(res, 'Cooperative not found', 404);
+      return;
+    }
+
+    const user = await prisma.user.update({
+      where: { id: userId },
+      data: { cooperativeId },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        status: true,
+        cooperative: {
+          select: { id: true, name: true },
+        },
+      },
+    });
+
+    await prisma.activityLog.create({
+      data: {
+        userId: req.user!.id,
+        action: 'Cambió la cooperativa de un usuario',
+        details: `Usuario: ${user.name}, Nueva cooperativa: ${cooperative.name}`,
+        ipAddress: req.ip,
+      },
+    });
+
+    sendSuccess(res, user, 'User cooperative updated');
+  } catch (error) {
+    sendError(res, 'Failed to change user cooperative', 500);
   }
 }
 

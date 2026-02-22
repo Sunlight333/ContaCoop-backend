@@ -343,7 +343,47 @@ export async function exportMembershipFees(req: AuthRequest, res: Response): Pro
   }
 }
 
-// Export Financial Ratios to Excel
+// Helper: Calculate financial ratios from balance sheet and cash flow data
+async function calculateRatiosForExport(cooperativeId: string, year: number, month: number) {
+  const balanceEntries = await prisma.balanceSheetEntry.findMany({
+    where: { cooperativeId, year, month },
+  });
+  const cashFlowEntries = await prisma.cashFlowEntry.findMany({
+    where: { cooperativeId, year, month },
+  });
+
+  const currentAssetSubs = [
+    'asset_receivable', 'asset_cash', 'asset_current', 'asset_prepayments',
+    'current_assets', 'cash', 'receivable', 'current', 'prepayments',
+    'activo corriente',
+  ];
+  const currentLiabilitySubs = [
+    'liability_payable', 'liability_credit_card', 'liability_current',
+    'current_liabilities', 'payable',
+    'pasivo corriente',
+  ];
+
+  const totalAssets = balanceEntries.filter(e => e.category === 'assets').reduce((sum, e) => sum + e.finalDebit - e.finalCredit, 0);
+  const totalLiabilities = balanceEntries.filter(e => e.category === 'liabilities').reduce((sum, e) => sum + e.finalCredit - e.finalDebit, 0);
+  const totalEquity = balanceEntries.filter(e => e.category === 'equity').reduce((sum, e) => sum + e.finalCredit - e.finalDebit, 0);
+  const currentAssets = balanceEntries.filter(e => e.category === 'assets' && e.subcategory && currentAssetSubs.includes(e.subcategory.toLowerCase())).reduce((sum, e) => sum + e.finalDebit - e.finalCredit, 0);
+  const currentLiabilities = balanceEntries.filter(e => e.category === 'liabilities' && e.subcategory && currentLiabilitySubs.includes(e.subcategory.toLowerCase())).reduce((sum, e) => sum + e.finalCredit - e.finalDebit, 0);
+  const effectiveCurrentAssets = currentAssets > 0 ? currentAssets : totalAssets;
+  const effectiveCurrentLiabilities = currentLiabilities > 0 ? currentLiabilities : totalLiabilities;
+
+  const operatingEntries = cashFlowEntries.filter(e => e.category === 'operating');
+  const operatingRevenue = operatingEntries.filter(e => e.amount > 0).reduce((sum, e) => sum + e.amount, 0);
+  const netOperatingIncome = operatingEntries.reduce((sum, e) => sum + e.amount, 0);
+
+  return [
+    { name: 'Liquidez Corriente', value: effectiveCurrentLiabilities !== 0 ? effectiveCurrentAssets / effectiveCurrentLiabilities : 0, isPercentage: false, description: 'Capacidad de pago a corto plazo' },
+    { name: 'Endeudamiento', value: totalAssets !== 0 ? totalLiabilities / totalAssets : 0, isPercentage: true, description: 'Nivel de endeudamiento' },
+    { name: 'Rentabilidad del Patrimonio', value: totalEquity !== 0 ? netOperatingIncome / totalEquity : 0, isPercentage: true, description: 'Rentabilidad para los socios' },
+    { name: 'Margen Operacional', value: operatingRevenue !== 0 ? netOperatingIncome / operatingRevenue : 0, isPercentage: true, description: 'Eficiencia operativa' },
+  ];
+}
+
+// Export Financial Ratios to Excel (calculated from Balance Sheet)
 export async function exportRatios(req: AuthRequest, res: Response): Promise<void> {
   try {
     const cooperativeId = req.query.cooperativeId as string || req.user?.cooperativeId;
@@ -355,9 +395,7 @@ export async function exportRatios(req: AuthRequest, res: Response): Promise<voi
       return;
     }
 
-    const ratios = await prisma.financialRatio.findMany({
-      where: { cooperativeId, year, month },
-    });
+    const ratios = await calculateRatiosForExport(cooperativeId, year, month);
 
     const cooperative = await prisma.cooperative.findUnique({
       where: { id: cooperativeId },
@@ -374,7 +412,7 @@ export async function exportRatios(req: AuthRequest, res: Response): Promise<voi
     worksheet.getCell('A2').value = `Ratios Financieros - ${month}/${year}`;
     worksheet.getCell('A2').font = { size: 12 };
 
-    worksheet.getRow(4).values = ['Ratio', 'Valor', 'Tendencia', 'Descripción'];
+    worksheet.getRow(4).values = ['Ratio', 'Valor', 'Formato', 'Descripción'];
     worksheet.getRow(4).font = { bold: true };
     worksheet.getRow(4).fill = {
       type: 'pattern',
@@ -383,7 +421,7 @@ export async function exportRatios(req: AuthRequest, res: Response): Promise<voi
     };
 
     worksheet.columns = [
-      { width: 25 },
+      { width: 30 },
       { width: 15 },
       { width: 12 },
       { width: 40 },
@@ -391,12 +429,11 @@ export async function exportRatios(req: AuthRequest, res: Response): Promise<voi
 
     let rowIndex = 5;
     for (const ratio of ratios) {
-      const isPercentage = ratio.name.includes('ROE') || ratio.name.includes('Margin');
       worksheet.getRow(rowIndex).values = [
         ratio.name,
-        isPercentage ? ratio.value * 100 : ratio.value,
-        ratio.trend === 'up' ? '↑ Mejora' : ratio.trend === 'down' ? '↓ Baja' : '→ Estable',
-        ratio.description || '',
+        ratio.isPercentage ? `${(ratio.value * 100).toFixed(1)}%` : ratio.value.toFixed(2),
+        ratio.isPercentage ? 'Porcentaje' : 'Valor',
+        ratio.description,
       ];
       rowIndex++;
     }

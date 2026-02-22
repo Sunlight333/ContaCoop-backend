@@ -8,6 +8,7 @@ import {
   getOdooStatus,
   saveOdooConfig,
   testOdooConnection,
+  getOdooCompanies,
   exportAllData,
 } from '../controllers/settings.controller.js';
 
@@ -27,6 +28,7 @@ router.put('/backups', updateBackupSettings);
 router.get('/odoo/status', getOdooStatus);
 router.put('/odoo/config', saveOdooConfig);
 router.post('/odoo/test', testOdooConnection);
+router.post('/odoo/companies', getOdooCompanies);
 
 // Data export
 router.get('/data/export', exportAllData);

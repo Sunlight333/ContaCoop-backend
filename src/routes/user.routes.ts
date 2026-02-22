@@ -5,6 +5,7 @@ import {
   createUser,
   changeUserRole,
   changeUserStatus,
+  changeUserCooperative,
   resetUserPassword,
   getUserById,
 } from '../controllers/user.controller.js';
@@ -21,6 +22,7 @@ router.post('/', createUser);
 router.get('/:userId', getUserById);
 router.put('/:userId/role', changeUserRole);
 router.put('/:userId/status', changeUserStatus);
+router.put('/:userId/cooperative', changeUserCooperative);
 router.post('/:userId/reset-password', resetUserPassword);
 
 export default router;
