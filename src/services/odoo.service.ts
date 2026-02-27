@@ -492,8 +492,8 @@ class OdooService {
       const existing = accountTotals.get(accountId) || {
         debit: 0,
         credit: 0,
-        code: account.code,
-        name: account.name,
+        code: account.code || '',
+        name: account.name || '',
         type: account.account_type,
       };
 
